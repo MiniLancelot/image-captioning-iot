@@ -474,4 +474,4 @@ if __name__ == '__main__':
     print("  GET /health - Health check")
     print("  GET / - API information")
 
-    app.run(host='0.0.0.0', port=5060, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=False)
