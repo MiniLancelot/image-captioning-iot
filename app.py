@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from piper import PiperVoice
 import io
 import torch
-import torch.quantization
+import torch.quantization-
 
 warnings.filterwarnings("ignore")
 
