@@ -10,6 +10,8 @@ from google import genai
 from dotenv import load_dotenv
 from piper import PiperVoice
 import io
+import torch
+import torch.quantization
 
 warnings.filterwarnings("ignore")
 
@@ -23,8 +25,38 @@ genai_client = None
 piper_voice = None
 
 
+def quantize_model(model):
+    try:
+        print("Applying dynamic quantization to model...")
+        start_time = time.time()
+        
+        quantized_model = torch.quantization.quantize_dynamic(
+            model, 
+            {torch.nn.Linear}, 
+            dtype=torch.qint8
+        )
+        
+        quantization_time = time.time() - start_time
+        print(f"Model quantization completed in {quantization_time:.2f} seconds")
+        
+        # Get model size comparison
+        original_size = sum(p.numel() * p.element_size() for p in model.parameters()) / (1024 * 1024)
+        quantized_size = sum(p.numel() * p.element_size() for p in quantized_model.parameters()) / (1024 * 1024)
+        
+        print(f"Model size reduced from {original_size:.1f}MB to {quantized_size:.1f}MB "
+              f"({((original_size - quantized_size) / original_size * 100):.1f}% reduction)")
+        
+        return quantized_model
+        
+    except Exception as e:
+        print(f"Quantization failed: {e}. Using original model.")
+        return model
+
+
 def load_model():
     global llm_processor, llm_model
+    
+    enable_quantization = os.environ.get('ENABLE_QUANTIZATION', 'true').lower() == 'true'
 
     preferred_local_dir = os.environ.get('BLIP_MODEL_DIR') or os.path.join(
         os.path.dirname(__file__),
@@ -51,9 +83,17 @@ def load_model():
         llm_model = BlipForConditionalGeneration.from_pretrained(repo_id)
         model_source_desc = f"Hugging Face Hub repo: {repo_id}"
 
+    # Set model to evaluation mode
     llm_model.eval()
-
-    print(f"Model loaded successfully and cached in memory from {model_source_desc}!")
+    
+    # Apply quantization if enabled
+    if enable_quantization:
+        llm_model = quantize_model(llm_model)
+        quantization_status = " (quantized for faster CPU inference)"
+    else:
+        quantization_status = " (full precision)"
+    
+    print(f"Model loaded successfully and cached in memory from {model_source_desc}{quantization_status}!")
 
 
 def load_piper_voice():
@@ -121,29 +161,46 @@ def synthesize_speech(text):
 
 def analyse_image(image):
     global llm_processor, llm_model
-
     try:
+        start_time = time.time()
+        
+        # Preprocessing optimizations for faster inference
         raw_image = image.convert('RGB')
-        target_size = (384, 384)
+        target_size = (384, 384)  # Optimized size for BLIP
         raw_image = raw_image.resize(target_size, Image.Resampling.LANCZOS)
-
+        
+        preprocessing_time = time.time() - start_time
+        
+        # Process with model
         inputs = llm_processor(raw_image, return_tensors="pt")
-
+        
+        # Optimized generation parameters for speed on CPU/quantized model
+        generation_start = time.time()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            outputs = llm_model.generate(
-                **inputs,
-                max_length=30,  # Shorter captions for speed
-                num_beams=3,  # Reduced from default 5 for speed
-                early_stopping=True,  # Stop when good caption found
-                do_sample=False  # Deterministic for consistency
-            )
-
+            with torch.no_grad():  # Disable gradients for faster inference
+                outputs = llm_model.generate(
+                    **inputs,
+                    max_length=25,        # Reduced for faster generation
+                    num_beams=2,          # Reduced from 3 for quantized model
+                    early_stopping=True,  # Stop when good caption found
+                    do_sample=False       # Deterministic for consistency
+                )
+        
+        generation_time = time.time() - generation_start
+        
         caption = llm_processor.decode(outputs[0], skip_special_tokens=True)
+        
+        total_time = time.time() - start_time
+        
+        # Log performance metrics
+        print(f"Image analysis completed in {total_time:.3f}s "
+              f"(preprocessing: {preprocessing_time:.3f}s, generation: {generation_time:.3f}s)")
+        
         return caption
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"An error occurred during image analysis: {e}")
         import traceback
         traceback.print_exc()
         return "Error processing the image."
